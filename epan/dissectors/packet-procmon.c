@@ -277,6 +277,30 @@ static int dissect_procmon_detail_string(tvbuff_t* tvb, proto_tree* tree, int of
         return offset + path_size;
 }
 
+static void dissect_procmon_io_mask(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, int offset, int hf_io_mask, int length, const value_string* vs_io_values)
+{
+    int i = 0;
+    bool first = true;
+    proto_item* ti;
+    uint32_t io_mask;
+
+    ti = proto_tree_add_bitmask_with_flags(tree, tvb, offset, hf_io_mask, ett_procmon_network_flags, vs_io_values, ENC_LITTLE_ENDIAN);
+
+    while (vs_io_values[i].strptr) {
+        if ((vs_io_values[i].value & io_mask) == vs_io_values[i].value)
+        {
+            if (first)
+                first = false;
+            else
+                proto_item_append_text(ti, ", ");
+            proto_item_append_text(ti, "%s", vs_io_values[i].strptr);
+        }
+
+        i++;
+    }
+}
+
+
 static void dissect_procmon_access_mask(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, int offset, int hf_access_mask, int length, uint32_t* mapping, const value_string* vs_mask_values)
 {
     int i = 0;
