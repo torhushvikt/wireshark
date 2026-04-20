@@ -1073,6 +1073,7 @@ set(DISSECTOR_SRC
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipsec.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipsi-ctl.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipv6.c
+	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipv8.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipvs-syncd.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipx.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-ipxwan.c

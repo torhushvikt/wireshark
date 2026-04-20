@@ -315,6 +315,7 @@ static heur_dissector_list_t heur_subdissector_list;
 static dissector_table_t ip_dissector_table;
 
 static dissector_handle_t ipv6_handle;
+static dissector_handle_t ipv8_handle;
 static capture_dissector_handle_t ip_cap_handle;
 
 
@@ -2535,6 +2536,9 @@ dissect_ip(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
   if(version == 6){
     return call_dissector(ipv6_handle, tvb, pinfo, tree);
   }
+  if (version == 8 && ipv8_handle != NULL) {
+    return call_dissector(ipv8_handle, tvb, pinfo, tree);
+  }
 
   /* Bogus IP version */
   ti = proto_tree_add_protocol_format(tree, proto_ip, tvb, 0, 1, "Internet Protocol, bogus version (%u)", version);
@@ -3222,6 +3226,7 @@ proto_reg_handoff_ip(void)
   int proto_clip;
 
   ipv6_handle = find_dissector("ipv6");
+  ipv8_handle = find_dissector("ipv8");
 
   dissector_add_uint("ethertype", ETHERTYPE_IP, ipv4_handle);
   dissector_add_uint("erf.types.type", ERF_TYPE_IPV4, ip_handle);

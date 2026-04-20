@@ -80,6 +80,24 @@ typedef struct _ws_ip6
 
 #define WS_IP6_PTR(p)         ((ws_ip6 *)(((p) && *(uint8_t *)(p) == 6) ? (p) : NULL))
 
+typedef struct _ws_ip8
+{
+    uint8_t ip8_ver;       /* 8 */
+    uint8_t ip8_tos;       /* type of service */
+    uint32_t ip8_len;      /* total length */
+    uint16_t ip8_id;       /* identification */
+    uint16_t ip8_off;      /* fragment offset */
+    uint8_t ip8_ttl;       /* time-to-live */
+    uint8_t ip8_proto;     /* protocol */
+    uint16_t ip8_sum;      /* checksum */
+    uint32_t ip8_src_asn;  /* source ASN prefix */
+    uint32_t ip8_src_host; /* source host */
+    uint32_t ip8_dst_asn;  /* destination ASN prefix */
+    uint32_t ip8_dst_host; /* destination host */
+} ws_ip8;
+
+#define WS_IP8_PTR(p)         ((ws_ip8 *)(((p) && *(uint8_t *)(p) == 8) ? (p) : NULL))
+
 struct ws_rthdr {
     struct ws_ip6_rthdr hdr;
     proto_item *ti_len;
@@ -125,12 +143,15 @@ ws_ip_protocol(void *iph)
 {
     ws_ip4 *ip4;
     ws_ip6 *ip6;
+    ws_ip8 *ip8;
 
     if (iph != NULL) {
         if ((ip4 = WS_IP4_PTR(iph)) != NULL)
             return ip4->ip_proto;
         if ((ip6 = WS_IP6_PTR(iph)) != NULL)
             return ip6->ip6_nxt;
+        if ((ip8 = WS_IP8_PTR(iph)) != NULL)
+            return ip8->ip8_proto;
     }
     return -1;
 }
