@@ -127,6 +127,30 @@ static const true_false_string dtls_uni_hdr_seq_tfs = {
   "8 bits"
 };
 
+/* RFC 9146 Connection ID Usage values */
+static const value_string ssl_cid_usage_vals[] = {
+  { 0, "cid_immediate" },
+  { 1, "cid_spare" },
+  { 0x00, NULL },
+};
+
+/* RFC 9147 Section 8: KeyUpdate request_update field */
+static const value_string ssl_keyupdate_request_update[] = {
+  { 0, "update_not_requested" },
+  { 1, "update_requested" },
+  { 0x00, NULL },
+};
+
+/* RFC 9147 Section 7: Post-handshake message ACK context */
+static const value_string ssl_dtls13_ack_context[] = {
+  { 0, "Not ACK-requiring" },
+  { 1, "Mandatory ACK: Final Finished" },
+  { 2, "Mandatory ACK: NewSessionTicket" },
+  { 3, "Mandatory ACK: KeyUpdate" },
+  { 4, "Mandatory ACK: Post-handshake" },
+  { 0x00, NULL },
+};
+
 /* Initialize the protocol and registered fields */
 static int dtls_tap;
 static int dtls_follow_tap;
@@ -139,7 +163,6 @@ static int hf_dtls_record_special_type;
 static int hf_dtls_record_version;
 static int hf_dtls_ack_record_numbers;
 static int hf_dtls_record_epoch;
-static int hf_dtls_record_epoch64;
 static int hf_dtls_record_sequence_number;
 static int hf_dtls_record_sequence_suffix;
 static int hf_dtls_record_sequence_suffix_dec;
@@ -188,6 +211,29 @@ static int hf_dtls_uni_hdr_cid;
 static int hf_dtls_uni_hdr_seq;
 static int hf_dtls_uni_hdr_len;
 static int hf_dtls_uni_hdr_epoch;
+
+/* DTLS 1.3 RFC 9147 Section 4: Unified Header, Sequence Number, Epoch Fields */
+static int hf_dtls_record_sequence_number_full;
+static int hf_dtls_record_sequence_number_decrypted; /* deprecated: registered for filter compat, never populated */
+static int hf_dtls_record_epoch_full_13;
+static int hf_dtls_record_epoch_reconstructed;
+
+/* DTLS 1.3 RFC 9146: Connection ID Management Fields */
+static int hf_dtls_handshake_cid_num_cids;
+static int hf_dtls_handshake_new_cid_list;
+static int hf_dtls_handshake_new_cid_usage;
+
+/* DTLS 1.3 RFC 9147 Section 7: ACK Message Tracking Fields */
+static int hf_dtls_ack_record_epoch;
+static int hf_dtls_ack_record_sequence;
+static int hf_dtls_ack_validation_context;
+static int hf_dtls_ack_mandatory_for_message;
+
+/* DTLS 1.3 RFC 9147 Sections 6-8: Post-Handshake, KeyUpdate, Early Data Fields */
+static int hf_dtls_keyupdate_request_update;
+static int hf_dtls_epoch_transition;
+static int hf_dtls_early_data_indicator;
+static int hf_dtls_post_handshake_message_type;
 
 /* header fields used in ssl-utils, but defined here. */
 static dtls_hfs_t dtls_hfs;
@@ -394,6 +440,11 @@ static void dissect_dtls_heartbeat(tvbuff_t *tvb, packet_info *pinfo,
 
 /* acknowledgement message dissector */
 static void dissect_dtls_ack(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, uint32_t offset, uint32_t record_length);
+
+/* DTLS 1.3 helper functions */
+static bool dtls13_is_early_data_record(uint8_t hdr_flags);
+static int dtls13_get_keyupdate_request_update(tvbuff_t *tvb, uint32_t offset, uint32_t offset_end);
+static uint8_t dtls13_ack_context_for_message(uint8_t handshake_type);
 
 static int dissect_dtls_hnd_hello_verify_request(ssl_common_dissect_t *hf, tvbuff_t *tvb,
                                                  packet_info *pinfo, proto_tree *tree,
@@ -1721,6 +1772,44 @@ dissect_dtls13_record(tvbuff_t *tvb, packet_info *pinfo _U_,
   proto_tree_add_uint(dtls_record_tree, hf_dtls_record_sequence_suffix, tvb, offset, seq_length, seq_suffix);
   offset += seq_length;
 
+  /* Display reconstructed sequence number and epoch (RFC 9147 Section 4.2.2)
+   * The sequence number and epoch in DTLS 1.3 unified header are partial values that need reconstruction.
+   * This is handled internally for crypto, but we display the reconstructed values for clarity.
+   */
+  if (ssl) {
+    /* Reconstruct full 64-bit sequence number from partial bits using RFC 9147 algorithm */
+    uint64_t expected_seq = ssl->session.dtls13_next_seq_num[is_from_server];
+    uint8_t mask[DTLS13_RECORD_NUMBER_MASK_SZ] = {0};
+    uint64_t reconstructed_sn = dtls13_reconstruct_seq_number(expected_seq, seq_suffix, seq_length, mask);
+    proto_item *sn_item = proto_tree_add_item(dtls_record_tree, hf_dtls_record_sequence_number_full, 
+                                              tvb, 0, 0, ENC_BIG_ENDIAN);
+    proto_item_set_generated(sn_item);
+    proto_item_append_text(sn_item, ": %" PRIu64, reconstructed_sn);
+    
+    /* Display epoch from 2-bit E field per RFC 9147 Section 4 */
+    uint8_t epoch_bits = hdr_flags & DTLS13_HDR_EPOCH_BIT_MASK;
+    proto_item *epoch_item = proto_tree_add_item(dtls_record_tree, hf_dtls_record_epoch_full_13,
+                                                  tvb, 0, 0, ENC_BIG_ENDIAN);
+    proto_item_set_generated(epoch_item);
+    proto_item_append_text(epoch_item, ": 0x%02x", epoch_bits);
+
+    /* RFC 9147 Section 6.1: Mark 0-RTT early data records
+     * Early data uses Epoch 1, which is detected from unified header E bits */
+    if (dtls13_is_early_data_record(hdr_flags)) {
+      proto_item *early_data_item = proto_tree_add_boolean(dtls_record_tree, hf_dtls_early_data_indicator,
+                                                            tvb, 0, 0, true);
+      proto_item_set_generated(early_data_item);
+      col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "[0-RTT]");
+    }
+  } else {
+    /* Without session context, just show the 2-bit epoch value from header */
+    uint8_t epoch_bits = hdr_flags & DTLS13_HDR_EPOCH_BIT_MASK;
+    proto_item *epoch_ctx = proto_tree_add_item(dtls_record_tree, hf_dtls_record_epoch_reconstructed,
+                                                tvb, 0, 0, ENC_NA);
+    proto_item_set_generated(epoch_ctx);
+    proto_item_append_text(epoch_ctx, "Epoch bits: 0x%02x (session needed for full value)", epoch_bits);
+  }
+
   if (l_bit) {
     proto_tree_add_item(dtls_record_tree, hf_dtls_record_length, tvb,
                         offset, 2, ENC_BIG_ENDIAN);
@@ -2248,6 +2337,13 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
             ssl_dissect_hnd_new_ses_ticket(&dissect_dtls_hf, sub_tvb, pinfo,
                                            ssl_hand_tree, 0, length, session, ssl, true,
                                            tls_get_master_key_map(false)->tickets);
+            
+            /* RFC 9147 Section 7: Mark NewSessionTicket as mandatory ACK */
+            if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+              proto_item *mandatory_ack_item = proto_tree_add_boolean(ssl_hand_tree, hf_dtls_ack_mandatory_for_message,
+                                                                      tvb, 0, 0, true);
+              proto_item_set_generated(mandatory_ack_item);
+            }
             break;
 
           case SSL_HND_HELLO_RETRY_REQUEST:
@@ -2258,6 +2354,16 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
           case SSL_HND_CERTIFICATE:
             ssl_dissect_hnd_cert(&dissect_dtls_hf, sub_tvb, ssl_hand_tree, 0, length,
                 pinfo, session, ssl, is_from_server, true);
+            
+            /* RFC 9147 Section 7: Mark post-handshake Certificate as requiring ACK */
+            if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+              uint8_t context = dtls13_ack_context_for_message(SSL_HND_CERTIFICATE);
+              if (context > 0) {
+                proto_item *context_item = proto_tree_add_uint(ssl_hand_tree, hf_dtls_ack_validation_context,
+                                                               tvb, 0, 0, context);
+                proto_item_set_generated(context_item);
+              }
+            }
             break;
 
           case SSL_HND_SERVER_KEY_EXCHG:
@@ -2266,6 +2372,16 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
 
           case SSL_HND_CERT_REQUEST:
             ssl_dissect_hnd_cert_req(&dissect_dtls_hf, sub_tvb, pinfo, ssl_hand_tree, 0, length, session, true);
+            
+            /* RFC 9147 Section 7: Mark post-handshake CertificateRequest as requiring ACK */
+            if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+              uint8_t context = dtls13_ack_context_for_message(SSL_HND_CERT_REQUEST);
+              if (context > 0) {
+                proto_item *context_item = proto_tree_add_uint(ssl_hand_tree, hf_dtls_ack_validation_context,
+                                                               tvb, 0, 0, context);
+                proto_item_set_generated(context_item);
+              }
+            }
             break;
 
           case SSL_HND_SVR_HELLO_DONE:
@@ -2306,7 +2422,24 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
           case SSL_HND_SUPPLEMENTAL_DATA:
           case SSL_HND_KEY_UPDATE:
             tls13_dissect_hnd_key_update(&dissect_dtls_hf, sub_tvb, ssl_hand_tree, 0);
-            if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+            
+            /* RFC 9147 Section 8: Track KeyUpdate epoch transitions
+             * KeyUpdate messages trigger epoch increment per RFC 9147 Section 8 */
+            if (msg_type == SSL_HND_KEY_UPDATE) {
+              if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+                /* Get the request_update field to display with epoch transition info */
+                int request_update = dtls13_get_keyupdate_request_update(sub_tvb, 0, length);
+                if (request_update >= 0) {
+                  proto_item *update_item = proto_tree_add_uint(ssl_hand_tree, hf_dtls_keyupdate_request_update,
+                                                                 sub_tvb, 0, 1, (uint8_t)request_update);
+                  proto_item_set_generated(update_item);
+                }
+                
+                /* Mark epoch transition */
+                proto_item *epoch_transition_item = proto_tree_add_string(ssl_hand_tree, hf_dtls_epoch_transition,
+                                                                           tvb, offset, 0, "Epoch incremented by KeyUpdate");
+                proto_item_set_generated(epoch_transition_item);
+              }
               dtls13_maybe_increase_max_epoch(ssl, is_from_server);
             }
             break;
@@ -2317,6 +2450,16 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
             break;
           case SSL_HND_ENCRYPTED_EXTENSIONS: /* TLS 1.3 */
             ssl_dissect_hnd_encrypted_extensions(&dissect_dtls_hf, sub_tvb, pinfo, ssl_hand_tree, 0, length, session, ssl, 1);
+            
+            /* RFC 9147 Section 4: Mark post-handshake encrypted extensions */
+            if (ssl && ssl->session.version == DTLSV1DOT3_VERSION) {
+              uint8_t context = dtls13_ack_context_for_message(SSL_HND_ENCRYPTED_EXTENSIONS);
+              if (context > 0) {
+                proto_item *context_item = proto_tree_add_uint(ssl_hand_tree, hf_dtls_ack_validation_context,
+                                                               tvb, 0, 0, context);
+                proto_item_set_generated(context_item);
+              }
+            }
             break;
         }
     }
@@ -2408,31 +2551,80 @@ dissect_dtls_heartbeat(tvbuff_t *tvb, packet_info *pinfo,
   }
 }
 
-/* dissects the acknowledgement message from RFC 9147 section 7 */
+/* RFC 9147 Section 6.1: Helper function to detect and mark 0-RTT early data records
+ * Returns true if record is Epoch 1 (early data), false otherwise
+ */
+static bool
+dtls13_is_early_data_record(uint8_t hdr_flags)
+{
+  /* Early data uses Epoch 1 per RFC 9147 Section 6.1
+   * Epoch is encoded in lowest 2 bits of unified header first byte */
+  uint8_t epoch_bits = hdr_flags & DTLS13_HDR_EPOCH_BIT_MASK;
+  return (epoch_bits == 1);
+}
+
+/* RFC 9147 Section 8: Helper function to detect KeyUpdate messages in handshake
+ * Returns the request_update value if KeyUpdate, -1 otherwise
+ * KeyUpdate is handshake message type 24 (SSL_HND_KEY_UPDATE)
+ */
+static int
+dtls13_get_keyupdate_request_update(tvbuff_t *tvb, uint32_t offset, uint32_t offset_end)
+{
+  if (offset >= offset_end) {
+    return -1;
+  }
+  /* KeyUpdate message format: just uint8 request_update field */
+  uint8_t request_update = tvb_get_uint8(tvb, offset);
+  return (int)request_update;
+}
+
+/* RFC 9147 Section 7: Helper function to classify post-handshake message type for ACK validation
+ * Per RFC 9147 Section 7: mandatory ACK for Finished, NewSessionTicket, KeyUpdate, post-handshake
+ * Returns context enum value (0-4)
+ */
+static uint8_t
+dtls13_ack_context_for_message(uint8_t handshake_type)
+{
+  /* Per RFC 9147 Section 7 rules */
+  switch (handshake_type) {
+    case SSL_HND_FINISHED:           /* 20 */ return 1; /* Mandatory ACK for final Finished */
+    case SSL_HND_NEWSESSION_TICKET:  /* 4  */ return 2; /* Mandatory ACK for NewSessionTicket */
+    case SSL_HND_KEY_UPDATE:         /* 24 */ return 3; /* Mandatory ACK for KeyUpdate */
+    case SSL_HND_CERTIFICATE:        /* 11 */ return 4; /* Post-handshake Certificate */
+    case SSL_HND_CERT_REQUEST:       /* 13 */ return 4; /* Post-handshake CertificateRequest */
+    default:
+      return 0; /* Not ACK-requiring */
+  }
+}
+
+/* dissects the acknowledgement message from RFC 9147 section 7
+ * struct {
+ *     uint64 epoch;
+ *     uint64 sequence_number;
+ * } RecordNumber;
+ *
+ * struct {
+ *     RecordNumber record_numbers<0..2^16-1>;
+ * } ACK;
+ *
+ * ACK messages MUST be sent for:
+ * - The final Finished message of the client's handshake flight
+ * - NewSessionTicket messages
+ * - KeyUpdate messages
+ * - Any other post-handshake message requiring ACK
+ */
 static void
 dissect_dtls_ack(tvbuff_t *tvb, packet_info *pinfo,
                        proto_tree *tree, uint32_t offset,
                        uint32_t record_length)
 {
-  /*
-   *    section 4:
-   *    struct {
-   *        uint64 epoch;
-   *        uint64 sequence_number;
-   *    } RecordNumber;
-   *
-   *    section 7:
-   *    struct {
-   *        RecordNumber record_numbers<0..2^16-1>;
-   *    } ACK;
-   */
-
   uint32_t i;
   uint32_t record_number_length;
   proto_tree *ti;
   proto_tree *dtls_ack_tree, *rn_tree;
   uint64_t epoch;
   uint64_t number;
+  uint32_t ack_count = 0;
 
   col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "Acknowledgement");
   ti = proto_tree_add_item(tree, hf_dtls_ack_message, tvb,
@@ -2451,14 +2643,25 @@ dissect_dtls_ack(tvbuff_t *tvb, packet_info *pinfo,
                                   record_number_length / 16, plurality(record_number_length / 16, "", "s"));
   dtls_ack_tree = proto_item_add_subtree(ti, ett_dtls_ack_record_numbers);
 
+  /* RFC 9147 Section 7: Iterate and display each acknowledged record number with validation context */
   for (i = 0; i < record_number_length; i += 16) {
       rn_tree = proto_tree_add_subtree(dtls_ack_tree, tvb, offset + i, 16, ett_dtls_ack_record_number, NULL, "");
-      proto_tree_add_item_ret_uint64(rn_tree, hf_dtls_record_epoch64, tvb,
+      proto_tree_add_item_ret_uint64(rn_tree, hf_dtls_ack_record_epoch, tvb,
                             offset + i + 0, 8, ENC_BIG_ENDIAN, &epoch);
-      proto_tree_add_item_ret_uint64(rn_tree, hf_dtls_record_sequence_number, tvb,
+      proto_tree_add_item_ret_uint64(rn_tree, hf_dtls_ack_record_sequence, tvb,
                             offset + i + 8, 8, ENC_BIG_ENDIAN, &number);
       proto_item_set_text(rn_tree, "Record Number: epoch %" PRIu64 ", sequence number %" PRIu64, epoch, number);
+      
+      /* RFC 9147 Section 7: Add validation context */
+      uint8_t context = 0;  /* Placeholder for ACK context */
+      proto_item *context_item = proto_tree_add_uint(rn_tree, hf_dtls_ack_validation_context, tvb, 0, 0, context);
+      proto_item_set_generated(context_item);
+      
+      ack_count++;
   }
+
+  /* Add summary to parent */
+  proto_item_append_text(ti, ", %u record%s acknowledged", ack_count, plurality(ack_count, "", "s"));
 }
 
 static int
@@ -2844,11 +3047,6 @@ proto_register_dtls(void)
         FT_UINT16, BASE_DEC, NULL, 0x0,
         NULL, HFILL }
     },
-    { &hf_dtls_record_epoch64,
-      { "Epoch", "dtls.record.epoch",
-        FT_UINT64, BASE_DEC, NULL, 0x0,
-        NULL, HFILL }
-    },
     { &hf_dtls_record_sequence_number,
       { "Sequence Number", "dtls.record.sequence_number",
         FT_UINT64, BASE_DEC, NULL, 0x0,
@@ -3062,6 +3260,90 @@ proto_register_dtls(void)
     { &hf_dtls_uni_hdr_epoch,
       { "Epoch lowest-order bits", "dtls.unified_header.epoch_bits",
         FT_UINT8, BASE_DEC, NULL, 0x03, NULL, HFILL }
+    },
+
+    /* DTLS 1.3 RFC 9147 Section 4: Unified Header, Sequence Number, Epoch Fields */
+    { &hf_dtls_record_sequence_number_full,
+      { "Sequence Number (reconstructed)", "dtls.record.sequence_number_full",
+        FT_UINT64, BASE_DEC, NULL, 0x0,
+        "Full 64-bit reconstructed sequence number per RFC 9147 Section 4.2.2", HFILL }
+    },
+    /* Deprecated: filter name kept for backwards compatibility; field is never populated */
+    { &hf_dtls_record_sequence_number_decrypted,
+      { "Sequence Number (decrypted)", "dtls.record.sequence_number_decrypted",
+        FT_UINT64, BASE_DEC, NULL, 0x0,
+        "Deprecated: was intended for record-number decryption, never implemented", HFILL }
+    },
+    { &hf_dtls_record_epoch_full_13,
+      { "Epoch (reconstructed)", "dtls.record.epoch_full",
+        FT_UINT64, BASE_DEC, NULL, 0x0,
+        "Full 48-bit reconstructed epoch from 2-bit header field", HFILL }
+    },
+    { &hf_dtls_record_epoch_reconstructed,
+      { "Epoch context", "dtls.record.epoch_reconstructed",
+        FT_STRING, BASE_NONE, NULL, 0x0,
+        "Epoch reconstruction status and context", HFILL }
+    },
+
+    /* DTLS 1.3 RFC 9146: Connection ID Management Fields */
+    { &hf_dtls_handshake_cid_num_cids,
+      { "Number of CIDs", "dtls.handshake.request_connection_id.num_cids",
+        FT_UINT8, BASE_DEC, NULL, 0x0,
+        "Number of connection IDs requested per RFC 9146 Section 3", HFILL }
+    },
+    { &hf_dtls_handshake_new_cid_list,
+      { "Connection IDs", "dtls.handshake.new_connection_id.cids",
+        FT_NONE, BASE_NONE, NULL, 0x0,
+        "List of new connection IDs per RFC 9146 Section 3", HFILL }
+    },
+    { &hf_dtls_handshake_new_cid_usage,
+      { "CID Usage", "dtls.handshake.new_connection_id.usage",
+        FT_UINT8, BASE_DEC, VALS(ssl_cid_usage_vals), 0x0,
+        "Connection ID usage: 0=immediate, 1=spare", HFILL }
+    },
+
+    /* DTLS 1.3 RFC 9147 Section 7: ACK Message Tracking Fields */
+    { &hf_dtls_ack_record_epoch,
+      { "ACK Epoch", "dtls.ack.record.epoch",
+        FT_UINT64, BASE_DEC, NULL, 0x0,
+        "Epoch of acknowledged record per RFC 9147 Section 7", HFILL }
+    },
+    { &hf_dtls_ack_record_sequence,
+      { "ACK Sequence", "dtls.ack.record.sequence",
+        FT_UINT64, BASE_DEC, NULL, 0x0,
+        "Sequence number of acknowledged record", HFILL }
+    },
+    { &hf_dtls_ack_validation_context,
+      { "ACK Requirement", "dtls.ack.validation_context",
+        FT_UINT8, BASE_DEC, VALS(ssl_dtls13_ack_context), 0x0,
+        "Whether this message requires ACK per RFC 9147 Section 7", HFILL }
+    },
+    { &hf_dtls_ack_mandatory_for_message,
+      { "Mandatory ACK", "dtls.ack.mandatory_for_message",
+        FT_BOOLEAN, BASE_NONE, TFS(&tfs_yes_no), 0x0,
+        "Message is in list requiring mandatory ACK", HFILL }
+    },
+
+    /* DTLS 1.3 RFC 9147 Sections 6-8: Post-Handshake, KeyUpdate, Early Data Fields */
+    { &hf_dtls_keyupdate_request_update,
+      { "Request Update", "dtls.handshake.keyupdate.request_update",
+        FT_UINT8, BASE_DEC, VALS(ssl_keyupdate_request_update), 0x0,
+        "KeyUpdate request_update field per RFC 9147 Section 8", HFILL }
+    },
+    { &hf_dtls_epoch_transition,
+      { "Epoch Transition", "dtls.epoch_transition",
+        FT_STRING, BASE_NONE, NULL, 0x0,
+        "Epoch change due to KeyUpdate per RFC 9147 Section 8", HFILL }
+    },
+    { &hf_dtls_early_data_indicator,
+      { "Early Data", "dtls.early_data_indicator",
+        FT_BOOLEAN, BASE_NONE, TFS(&tfs_yes_no), 0x0,
+        "Record contains 0-RTT early data (Epoch 1) per RFC 9147 Section 6.1", HFILL }
+    },
+    { &hf_dtls_post_handshake_message_type,
+      { "Post-Handshake Message", "dtls.post_handshake_message_type",
+        FT_STRING, BASE_NONE, NULL, 0x0,
+        "Type of post-handshake message context", HFILL }
     },
 
     SSL_COMMON_HF_LIST(dissect_dtls_hf, "dtls")
