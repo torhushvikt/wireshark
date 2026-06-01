@@ -1427,6 +1427,7 @@ static bool dtls13_decrypt_unified_record(tvbuff_t *tvb, packet_info *pinfo, uin
                                               SslDecryptSession *ssl, uint32_t dtls_record_length, uint8_t curr_layer_num_ssl,
                                               uint16_t seq_suffix, uint8_t seq_length)
 {
+  /* RFC 9147 Section 4.2.3: Sequence number reconstruction with XOR masking and anti-replay */
   uint8_t mask[DTLS13_RECORD_NUMBER_MASK_SZ];
   uint64_t sequence_number;
   SslDecoder *dec = NULL;
@@ -1671,6 +1672,7 @@ dissect_dtls13_record(tvbuff_t *tvb, packet_info *pinfo _U_,
   s_bit = (hdr_flags & DTLS13_S_BIT_MASK) == DTLS13_S_BIT_MASK;
   l_bit = (hdr_flags & DTLS13_L_BIT_MASK) == DTLS13_L_BIT_MASK;
   hdr_offset += 1;
+  /* RFC 9147 Section 4.1: DTLS 1.3 unified header parsing */
 
   if (c_bit) {
     /* Connection ID length to use if any */
@@ -1739,8 +1741,25 @@ dissect_dtls13_record(tvbuff_t *tvb, packet_info *pinfo _U_,
   }
 
   if (ssl) {
+    /* RFC 9147 Section 4.3: Epoch management and key phase tracking */
+    uint64_t before_epoch = ssl->session.dtls13_current_epoch[is_from_server];
     success = dtls13_setup_keys(hdr_flags, is_from_server, ssl, dtls_record_length, &is_first_early_data);
     if (success) {
+      uint64_t after_epoch = ssl->session.dtls13_current_epoch[is_from_server];
+      /* Annotate epoch phase for debugging and protocol understanding */
+      if (before_epoch != after_epoch) {
+        const char *epoch_phase = "Unknown";
+        switch (after_epoch & 0x3) {
+          case 1: epoch_phase = "Early Data (0-RTT)"; break;
+          case 2: epoch_phase = "Handshake"; break;
+          case 3: epoch_phase = "Application Data"; break;
+          default: epoch_phase = "KeyUpdate"; break;
+        }
+        proto_item *epoch_pi = proto_tree_add_uint_format(dtls_record_tree, hf_dtls_uni_hdr_epoch,
+                                tvb, hdr_start, 1, (uint32_t)(after_epoch & 0xFF),
+                                "Epoch transition: %llu -> %llu (%s phase)", (unsigned long long)before_epoch, (unsigned long long)after_epoch, epoch_phase);
+        proto_item_set_generated(epoch_pi);
+      }
       if (!is_from_server && is_first_early_data) {
         /* try to decrypt early data */
         dtls13_decrypt_early_data(tvb, pinfo, hdr_start, hdr_offset - hdr_start, hdr_flags, dtls_record_length, ssl, curr_layer_num_ssl, seq_suffix, seq_length);
