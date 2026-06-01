@@ -132,6 +132,10 @@ static int dtls_tap;
 static int dtls_follow_tap;
 static int exported_pdu_tap;
 static int proto_dtls;
+
+/* RFC 6347 Section 4 (Record Protocol) and Section 4.2.2 (Handshake Protocol)
+ * define the DTLS record and handshake header structures, including the epoch,
+ * sequence number, message sequence, and fragment offset/length fields below. */
 static int hf_dtls_stream;
 static int hf_dtls_record;
 static int hf_dtls_record_content_type;
@@ -922,6 +926,7 @@ dissect_dtls_record(tvbuff_t *tvb, packet_info *pinfo,
 {
 
   /*
+   * RFC 6347 Section 4.1 - DTLS Record Format (DTLSPlaintext):
    *    struct {
    *        uint8 major, minor;
    *    } ProtocolVersion;
@@ -933,11 +938,11 @@ dissect_dtls_record(tvbuff_t *tvb, packet_info *pinfo,
    *    } ContentType;
    *
    *    struct {
-   *        ContentType type;
-   *        ProtocolVersion version;
-   *        uint16 epoch;               // New field
-   *        uint48 sequence_number;     // New field
-   *        uint16 length;
+   *        ContentType type;           // Offset +0
+   *        ProtocolVersion version;   // Offset +1, 2 bytes
+   *        uint16 epoch;               // Offset +3, New field (DTLS)
+   *        uint48 sequence_number;     // Offset +5, New field (DTLS)
+   *        uint16 length;              // Offset +11
    *        opaque fragment[TLSPlaintext.length];
    *    } DTLSPlaintext;
    *
@@ -975,17 +980,17 @@ dissect_dtls_record(tvbuff_t *tvb, packet_info *pinfo,
   cid_length = dtls_cid_length(session, is_from_server);
 
   /*
-   * Get the record layer fields of interest
+   * Get the record layer fields of interest (RFC 6347 Section 4.1 DTLSPlaintext)
    */
-  content_type          = tvb_get_uint8(tvb, offset);
+  content_type          = tvb_get_uint8(tvb, offset);        /* Offset +0 */
   if ((content_type & DTLS13_FIXED_MASK) >> 5 == 1) {
     /* RFC 9147 s4.1: this is a DTLS 1.3 Unified Header record */
     return dissect_dtls13_record(tvb, pinfo, tree, offset, session,
                                is_from_server, ssl, curr_layer_num_ssl);
   }
-  version               = tvb_get_ntohs(tvb, offset + 1);
-  epoch                 = tvb_get_ntohs(tvb, offset + 3);
-  sequence_number       = tvb_get_ntoh48(tvb, offset + 5);
+  version               = tvb_get_ntohs(tvb, offset + 1);    /* Offset +1, RFC 6347 Section 4.1 */
+  epoch                 = tvb_get_ntohs(tvb, offset + 3);    /* Offset +3, RFC 6347 Section 4.1 epoch field */
+  sequence_number       = tvb_get_ntoh48(tvb, offset + 5);   /* Offset +5, RFC 6347 Section 4.1 sequence_number (48-bit) */
 
   if (content_type == SSL_ID_TLS12_CID && cid_length > 0) {
     cid = tvb_memdup(pinfo->pool, tvb, offset + 11, cid_length);
@@ -1893,12 +1898,13 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
                        SslDecryptSession* ssl, uint8_t content_type,
                        uint16_t epoch)
 {
-  /*     struct {
-   *         HandshakeType msg_type;
-   *         uint24 length;
-   *         uint16 message_seq;          //new field
-   *         uint24 fragment_offset;      //new field
-   *         uint24 fragment_length;      //new field
+  /* RFC 6347 Section 4.2.2 - DTLS Handshake Protocol with fragmentation support:
+   *     struct {
+   *         HandshakeType msg_type;             // Offset +0
+   *         uint24 length;                      // Offset +1, 3 bytes
+   *         uint16 message_seq;                 // Offset +4, New field (DTLS)
+   *         uint24 fragment_offset;             // Offset +6, New field (DTLS), see Section 4.2.3
+   *         uint24 fragment_length;             // Offset +9, New field (DTLS)
    *         select (HandshakeType) {
    *             case hello_request:       HelloRequest;
    *             case client_hello:        ClientHello;
@@ -2054,7 +2060,8 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
               /* Don't pass the reassembly code data that doesn't exist */
               tvb_ensure_bytes_exist(tvb, offset, fragment_length);
 
-              /* In DTLS 1.2, the message_seq is reset and the epoch incremented
+              /* Fragment reassembly keying (RFC 6347 Section 4.2.4 - Message Reassembly):
+               * In DTLS 1.2, the message_seq is reset and the epoch incremented
                * at each rehandshake (i.e., renegotiation), so concatenate them
                * for a fragment sequence number. However, in DTLS 1.3 the
                * message_seq is not reset in a post-handshake message exchange
@@ -2063,7 +2070,7 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
                * wrapped around, which is unlikely as it is only incremented
                * in handshake messages).
                * https://www.rfc-editor.org/rfc/rfc9147.html#section-5.2-6
-               * https://datatracker.ietf.org/doc/html/rfc6347#section-4.1
+               * https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.4
                */
               uint32_t frag_seq = (epoch << 16) | message_seq;
               frag_msg = fragment_add(&dtls_reassembly_table,
@@ -2156,10 +2163,14 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
             ssl_reset_session(session, ssl, msg_type == SSL_HND_CLIENT_HELLO);
         }
 
-        /*
+        /* RFC 6347 Section 4.2.6 - Handshake Protocol for Fragmented Messages:
          * Add handshake message (including type, length, etc.) to hash (for
          * Extended Master Secret). The computation must however happen as if
          * the message was sent in a single fragment (RFC 6347, section 4.2.6).
+         *
+         * Skip CertificateVerify since the handshake hash covers just
+         * ClientHello up to and including ClientKeyExchange, but the keys are
+         * actually retrieved in ChangeCipherSpec (which comes after that).
          */
         /* XXX - DTLS 1.3's handshake transcript has the same format as TLS 1.3
          * and lacks the DTLS specific fields (fragment info), unlike DTLS 1.2.
@@ -2226,11 +2237,11 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
             break;
 
           case SSL_HND_HELLO_VERIFY_REQUEST:
-            /*
+            /* RFC 6347 Section 4.2.1 - Hello Verify Request (HelloVerifyRequest):
              * The initial ClientHello and HelloVerifyRequest are not included
-             * in the calculation of the handshake_messages
-             * (https://tools.ietf.org/html/rfc6347#page-18). This is also
-             * important for correct calculation of Extended Master Secret.
+             * in the calculation of the handshake_messages (Section 7.4.9).
+             * This is also important for correct calculation of Extended Master Secret.
+             * See: https://tools.ietf.org/html/rfc6347#section-4.2.1
              */
             if (ssl && ssl->handshake_data.data_len) {
               ssl_debug_printf("%s erasing previous handshake_messages: %d\n", G_STRFUNC, ssl->handshake_data.data_len);
@@ -2819,6 +2830,7 @@ proto_register_dtls(void)
         FT_UINT32, BASE_DEC, NULL, 0x0,
         NULL, HFILL }
     },
+    /* RFC 6347 Section 4.1 - Record Protocol fields follow */
     { &hf_dtls_record,
       { "Record Layer", "dtls.record",
         FT_NONE, BASE_NONE, NULL, 0x0,
