@@ -1360,6 +1360,7 @@ static int dtls13_get_record_number_xor_mask(SslDecoder *dec, const uint8_t *cip
   }
 
   if (dec->cipher_suite->enc == ENC_CHACHA20) {
+    /* RFC 7905 (ChaCha20-Poly1305) and RFC 9147 (DTLS 1.3) sequence number masking */
     if (gcry_cipher_setiv(dec->sn_evp, ciphertext, DTLS13_RECORD_NUMBER_MASK_SZ) != 0) {
       ssl_debug_printf("dtls1.3: record mask generation failed: can't set iv\n");
       return -1;

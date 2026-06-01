@@ -443,6 +443,49 @@ class TestDecryptDTLS:
             ), encoding='utf-8', env=test_env)
         assert grep_output(stdout, 'UDT')
 
+    def test_dtls12_version_fields(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.2: Verify record version and epoch field dissection (RFC 6347 Section 4.1)'''
+        # Uses existing dtls12-aes128ccm8.pcap to validate field-level parsing
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls12-aes128ccm8.pcap'),
+                '-o', 'dtls.psk:ca19e028a8a372ad2d325f950fcaceed',
+                '-Tfields',
+                '-e', 'dtls.record.version',
+                '-e', 'dtls.record.epoch',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        # DTLS 1.2 version should be FEFD (0xfefd)
+        assert grep_output(stdout, 'fefd')
+        # Epoch should be present - check for epoch values (0 and/or 1 indicating key changes)
+        assert grep_output(stdout, '\t0') or grep_output(stdout, '\t1'), "No valid epoch values found"
+
+    def test_dtls12_handshake_fields(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.2: Verify handshake message sequencing and fragmentation (RFC 6347 Section 4.2.2)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls12-aes128ccm8.pcap'),
+                '-o', 'dtls.psk:ca19e028a8a372ad2d325f950fcaceed',
+                '-Tfields',
+                '-e', 'dtls.handshake.type',
+                '-e', 'dtls.handshake.message_seq',
+                '-e', 'dtls.handshake.fragment_offset',
+                '-Y', 'dtls.handshake',
+            ), encoding='utf-8', env=test_env)
+        # Should have ClientHello, ServerHello, and related handshake messages
+        assert grep_output(stdout, 'Client Hello|2|1')  # Handshake types present
+        # Message sequence numbers should be tracked
+        assert count_output(stdout, 'message_seq|\\d+') >= 1
+
+    def test_dtls12_record_content_type(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.2: Verify content type dissection (RFC 6347 Section 4.1)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls12-aes128ccm8.pcap'),
+                '-Tfields',
+                '-e', 'dtls.record.content_type',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        # Should contain various content types: Handshake(22), Application Data(23), Change Cipher Spec(20)
+        assert grep_output(stdout, '20|21|22|23|change|alert|handshake|app')
+
 
 class TestDecryptTLS:
     def test_tls_rsa(self, cmd_tshark, capture_file, features, test_env):

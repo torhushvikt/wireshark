@@ -677,6 +677,7 @@ const value_string ssl_31_content_type[] = {
     { 23, "Application Data" },
     { 24, "Heartbeat" },
     { 25, "Connection ID" },
+    { 26, "ACK" },            /* RFC 9147 §6.1 */
     { 0x00, NULL }
 };
 
