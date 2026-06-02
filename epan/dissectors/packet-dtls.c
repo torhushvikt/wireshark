@@ -127,6 +127,13 @@ static const true_false_string dtls_uni_hdr_seq_tfs = {
   "8 bits"
 };
 
+/* RFC 9147 §9 - ConnectionIdUsage enum values */
+static const value_string dtls_cid_usage_vals[] = {
+  { 0, "cid_immediate" },
+  { 1, "cid_spare" },
+  { 0, NULL }
+};
+
 /* Initialize the protocol and registered fields */
 static int dtls_tap;
 static int dtls_follow_tap;
@@ -170,6 +177,12 @@ static int hf_dtls_heartbeat_message_padding;
 
 static int hf_dtls_ack_message;
 static int hf_dtls_ack_record_numbers_length;
+
+/* RFC 9147 §9 - Connection ID messages */
+static int hf_dtls_new_cid_cids_length;
+static int hf_dtls_new_cid_cid;
+static int hf_dtls_new_cid_usage;
+static int hf_dtls_req_cid_num_cids;
 static int hf_dtls_fragments;
 static int hf_dtls_fragment;
 static int hf_dtls_fragment_overlap;
@@ -206,6 +219,8 @@ static int ett_dtls_ack;
 static int ett_dtls_ack_record_numbers;
 static int ett_dtls_ack_record_number;
 static int ett_dtls_certs;
+static int ett_dtls_new_cid;
+static int ett_dtls_new_cid_cids;
 static int ett_dtls_uni_hdr;
 
 static int ett_dtls_fragment;
@@ -398,6 +413,10 @@ static void dissect_dtls_heartbeat(tvbuff_t *tvb, packet_info *pinfo,
 
 /* acknowledgement message dissector */
 static void dissect_dtls_ack(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, uint32_t offset, uint32_t record_length);
+
+/* RFC 9147 §9 - Connection ID post-handshake message dissectors */
+static void dissect_dtls_hnd_request_connection_id(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, uint32_t offset, uint32_t length);
+static void dissect_dtls_hnd_new_connection_id(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, uint32_t offset, uint32_t length);
 
 static int dissect_dtls_hnd_hello_verify_request(ssl_common_dissect_t *hf, tvbuff_t *tvb,
                                                  packet_info *pinfo, proto_tree *tree,
@@ -2349,6 +2368,12 @@ dissect_dtls_handshake(tvbuff_t *tvb, packet_info *pinfo,
           case SSL_HND_ENCRYPTED_EXTENSIONS: /* TLS 1.3 */
             ssl_dissect_hnd_encrypted_extensions(&dissect_dtls_hf, sub_tvb, pinfo, ssl_hand_tree, 0, length, session, ssl, 1);
             break;
+          case SSL_HND_REQUEST_CONNECTION_ID: /* DTLS 1.3, RFC 9147 §9 */
+            dissect_dtls_hnd_request_connection_id(sub_tvb, pinfo, ssl_hand_tree, 0, length);
+            break;
+          case SSL_HND_NEW_CONNECTION_ID:     /* DTLS 1.3, RFC 9147 §9 */
+            dissect_dtls_hnd_new_connection_id(sub_tvb, pinfo, ssl_hand_tree, 0, length);
+            break;
         }
     }
 }
@@ -2490,6 +2515,73 @@ dissect_dtls_ack(tvbuff_t *tvb, packet_info *pinfo,
                             offset + i + 8, 8, ENC_BIG_ENDIAN, &number);
       proto_item_set_text(rn_tree, "Record Number: epoch %" PRIu64 ", sequence number %" PRIu64, epoch, number);
   }
+}
+
+/*
+ * RFC 9147 §9 - RequestConnectionId
+ *
+ *    struct {
+ *        uint8 num_cids;
+ *    } RequestConnectionId;
+ */
+static void
+dissect_dtls_hnd_request_connection_id(tvbuff_t *tvb, packet_info *pinfo,
+                                       proto_tree *tree, uint32_t offset,
+                                       uint32_t length _U_)
+{
+  col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "Request Connection ID");
+  proto_tree_add_item(tree, hf_dtls_req_cid_num_cids, tvb, offset, 1, ENC_BIG_ENDIAN);
+}
+
+/*
+ * RFC 9147 §9 - NewConnectionId
+ *
+ *    opaque ConnectionId<0..2^8-1>;
+ *
+ *    enum { cid_immediate(0), cid_spare(1), (255) } ConnectionIdUsage;
+ *
+ *    struct {
+ *        ConnectionId cids<0..2^16-1>;
+ *        ConnectionIdUsage usage;
+ *    } NewConnectionId;
+ */
+static void
+dissect_dtls_hnd_new_connection_id(tvbuff_t *tvb, packet_info *pinfo,
+                                   proto_tree *tree, uint32_t offset,
+                                   uint32_t length)
+{
+  uint32_t cids_length;
+  uint32_t cids_end;
+  proto_tree *ti;
+  proto_tree *cids_tree;
+  uint32_t cid_len;
+
+  col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "New Connection ID");
+
+  /* cids<0..2^16-1>: 2-byte length prefix */
+  if (!ssl_add_vector(&dissect_dtls_hf, tvb, pinfo, tree, offset, offset + length,
+                      &cids_length, hf_dtls_new_cid_cids_length, 0, UINT16_MAX)) {
+    return;
+  }
+  offset += 2;
+  cids_end = offset + cids_length;
+
+  ti = proto_tree_add_subtree_format(tree, tvb, offset, cids_length,
+                                     ett_dtls_new_cid_cids, NULL,
+                                     "Connection IDs (%u byte%s)",
+                                     cids_length, plurality(cids_length, "", "s"));
+  cids_tree = ti;
+
+  /* Each ConnectionId is opaque<0..255>: 1-byte length + data */
+  while (offset < cids_end) {
+    cid_len = tvb_get_uint8(tvb, offset);
+    proto_tree_add_item(cids_tree, hf_dtls_new_cid_cid, tvb, offset,
+                        1 + cid_len, ENC_BIG_ENDIAN | ENC_NA);
+    offset += 1 + cid_len;
+  }
+
+  /* ConnectionIdUsage: 1-byte enum */
+  proto_tree_add_item(tree, hf_dtls_new_cid_usage, tvb, offset, 1, ENC_BIG_ENDIAN);
 }
 
 static int
@@ -3095,6 +3187,28 @@ proto_register_dtls(void)
       { "Epoch lowest-order bits", "dtls.unified_header.epoch_bits",
         FT_UINT8, BASE_DEC, NULL, 0x03, NULL, HFILL }
     },
+    /* RFC 9147 §9 - NewConnectionId fields */
+    { &hf_dtls_new_cid_cids_length,
+      { "CIDs Length", "dtls.new_connection_id.cids_length",
+        FT_UINT16, BASE_DEC, NULL, 0x00,
+        "Length of the Connection IDs vector (RFC 9147 §9)", HFILL }
+    },
+    { &hf_dtls_new_cid_cid,
+      { "Connection ID", "dtls.new_connection_id.cid",
+        FT_UINT_BYTES, BASE_NONE|BASE_ALLOW_ZERO, NULL, 0x00,
+        "A Connection ID offered to the peer (RFC 9147 §9)", HFILL }
+    },
+    { &hf_dtls_new_cid_usage,
+      { "Usage", "dtls.new_connection_id.usage",
+        FT_UINT8, BASE_DEC, VALS(dtls_cid_usage_vals), 0x00,
+        "Whether the CID must be used immediately or is spare (RFC 9147 §9)", HFILL }
+    },
+    /* RFC 9147 §9 - RequestConnectionId fields */
+    { &hf_dtls_req_cid_num_cids,
+      { "Number of CIDs", "dtls.request_connection_id.num_cids",
+        FT_UINT8, BASE_DEC, NULL, 0x00,
+        "Number of new Connection IDs requested (RFC 9147 §9)", HFILL }
+    },
 
     SSL_COMMON_HF_LIST(dissect_dtls_hf, "dtls")
   };
@@ -3110,6 +3224,8 @@ proto_register_dtls(void)
     &ett_dtls_ack_record_number,
     &ett_dtls_ack_record_numbers,
     &ett_dtls_certs,
+    &ett_dtls_new_cid,
+    &ett_dtls_new_cid_cids,
     &ett_dtls_uni_hdr,
     &ett_dtls_fragment,
     &ett_dtls_fragments,

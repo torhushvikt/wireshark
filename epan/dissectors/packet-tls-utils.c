@@ -744,7 +744,9 @@ const value_string ssl_31_handshake_type[] = {
     { SSL_HND_NEWSESSION_TICKET, "New Session Ticket" },
     { SSL_HND_END_OF_EARLY_DATA, "End of Early Data" },
     { SSL_HND_HELLO_RETRY_REQUEST, "Hello Retry Request" },
-    { SSL_HND_ENCRYPTED_EXTENSIONS, "Encrypted Extensions" },
+    { SSL_HND_ENCRYPTED_EXTENSIONS,    "Encrypted Extensions" },
+    { SSL_HND_REQUEST_CONNECTION_ID,   "Request Connection ID" },  /* DTLS 1.3, RFC 9147 §9 */
+    { SSL_HND_NEW_CONNECTION_ID,       "New Connection ID" },      /* DTLS 1.3, RFC 9147 §9 */
     { SSL_HND_CERTIFICATE,       "Certificate" },
     { SSL_HND_SERVER_KEY_EXCHG,  "Server Key Exchange" },
     { SSL_HND_CERT_REQUEST,      "Certificate Request" },
@@ -10639,6 +10641,8 @@ ssl_is_valid_handshake_type(uint8_t hs_type, bool is_dtls)
     case SSL_HND_END_OF_EARLY_DATA:
     case SSL_HND_HELLO_RETRY_REQUEST:
     case SSL_HND_ENCRYPTED_EXTENSIONS:
+    case SSL_HND_REQUEST_CONNECTION_ID: /* DTLS 1.3 only, RFC 9147 §9 */
+    case SSL_HND_NEW_CONNECTION_ID:     /* DTLS 1.3 only, RFC 9147 §9 */
     case SSL_HND_CERTIFICATE:
     case SSL_HND_SERVER_KEY_EXCHG:
     case SSL_HND_CERT_REQUEST:

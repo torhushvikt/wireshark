@@ -3261,6 +3261,11 @@ dissect_tls_handshake_full(tvbuff_t *tvb, packet_info *pinfo,
 
                 break;
 
+            case SSL_HND_REQUEST_CONNECTION_ID: /* DTLS 1.3 only, RFC 9147 §9 */
+            case SSL_HND_NEW_CONNECTION_ID:     /* DTLS 1.3 only, RFC 9147 §9 */
+                /* Not applicable in TLS - silently ignore */
+                break;
+
             case SSL_HND_CERTIFICATE:
                 ssl_dissect_hnd_cert(&dissect_ssl3_hf, tvb, ssl_hand_tree,
                         offset, offset + length, pinfo, session, ssl, is_from_server, false);
