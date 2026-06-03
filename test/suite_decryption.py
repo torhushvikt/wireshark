@@ -486,6 +486,73 @@ class TestDecryptDTLS:
         # Should contain various content types: Handshake(22), Application Data(23), Change Cipher Spec(20)
         assert grep_output(stdout, '20|21|22|23|change|alert|handshake|app')
 
+    def test_dtls13_dsb_ack_count(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.3: Two ACK records (content type 26) present after DSB decryption (RFC 9147 §7)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls13-dsb.pcapng'),
+                '-Tfields',
+                '-e', 'dtls.record.content_type',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        assert count_output(stdout, '^26$') == 2, \
+            "Expected exactly 2 ACK records (content type 26)"
+
+    def test_dtls13_dsb_epoch_transitions(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.3: Epoch transitions 0->2 (Handshake) and 2->3 (Application Data) are annotated (RFC 9147 §4.3)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls13-dsb.pcapng'),
+                '-V',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        assert 'Epoch transition: 0 -> 2 (Handshake phase)' in stdout, \
+            "Missing epoch 0->2 handshake transition annotation"
+        assert 'Epoch transition: 2 -> 3 (Application Data phase)' in stdout, \
+            "Missing epoch 2->3 application data transition annotation"
+
+    def test_dtls13_dsb_handshake_sequence(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.3: Full handshake message sequence decrypted from DSB secrets (RFC 9147 §5)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls13-dsb.pcapng'),
+                '-Tfields',
+                '-e', 'dtls.handshake.type',
+                '-Y', 'dtls.handshake',
+            ), encoding='utf-8', env=test_env)
+        # Expect ClientHello(1), ServerHello(2), EncryptedExtensions(8),
+        # Certificate(11), CertificateVerify(15), Finished(20), NewSessionTicket(4)
+        types = [line.strip() for line in stdout.splitlines() if line.strip()]
+        for expected in ('1', '2', '8', '11', '15', '20', '4'):
+            assert expected in types, \
+                f"Missing handshake type {expected} in decrypted DTLS 1.3 capture"
+
+    def test_dtls13_dsb_content_types(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.3: Application Data (23), ACK (26) and Alert (21) records present after decryption'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls13-dsb.pcapng'),
+                '-Tfields',
+                '-e', 'dtls.record.content_type',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        types = set(line.strip() for line in stdout.splitlines() if line.strip())
+        assert '22' in types, "Missing Handshake (22) records"
+        assert '23' in types, "Missing Application Data (23) records"
+        assert '26' in types, "Missing ACK (26) records — DTLS 1.3 RFC 9147 §7"
+        assert '21' in types, "Missing Alert (21) records"
+
+    def test_dtls13_dsb_unified_header_epoch_bits(self, cmd_tshark, capture_file, test_env):
+        '''DTLS 1.3: Unified header epoch bits 2 (Handshake) and 3 (Application Data) present (RFC 9147 §4.2.2)'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dtls13-dsb.pcapng'),
+                '-Tfields',
+                '-e', 'dtls.unified_header.epoch_bits',
+                '-Y', 'dtls',
+            ), encoding='utf-8', env=test_env)
+        bits = set()
+        for line in stdout.splitlines():
+            bits.update(v.strip() for v in line.split(',') if v.strip())
+        assert '2' in bits, "Missing epoch bits=2 (Handshake phase) in unified header"
+        assert '3' in bits, "Missing epoch bits=3 (Application Data phase) in unified header"
+
+
 
 class TestDecryptTLS:
     def test_tls_rsa(self, cmd_tshark, capture_file, features, test_env):
