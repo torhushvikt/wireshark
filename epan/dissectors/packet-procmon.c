@@ -385,6 +385,16 @@ static const true_false_string process_architecture_tfs = { "64-bit", "32-bit" }
 // NTSTATUS codes (0xC0000000+) from ETW/kernel-mode operations
 // See: https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
 // See: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+/*
+ * Low numeric result codes are ambiguous in Procmon payloads because they can
+ * represent Win32 error codes or NTSTATUS values depending on event context.
+ * Keep a small NTSTATUS preference table for kernel-centric event classes.
+ */
+static const value_string ntstatus_context_result_vals[] = {
+  { 0x103, "STATUS_PENDING" },
+  { 0x104, "STATUS_REPARSE" },
+  { 0, NULL }
+};
 static const value_string system_error_code_vals[] = {
         // Win32 Success/Info codes (0x0-0x7F)
         { 0x0, "SUCCESS" },
@@ -465,6 +475,7 @@ static const value_string system_error_code_vals[] = {
         { 0xF5, "SIGNAL_PENDING" },
         { 0xF6, "SIGNAL_PENDING" },
         { 0x102, "THREAD_1_INACTIVE" },
+        { 0x103, "ERROR_NO_MORE_ITEMS" },
         // Win32 Directory and Path errors (0x110-0x14F)
         { 0x110, "THREAD_MODE_ALREADY_BACKGROUND" },
         { 0x111, "THREAD_MODE_NOT_BACKGROUND" },
@@ -544,6 +555,7 @@ static const value_string system_error_code_vals[] = {
         { 0x1A1, "NULL_LM_PASSWORD" },
         { 0x1F4, "WAIT_NO_CHILDREN" },
         { 0x1F5, "CHILD_NOT_COMPLETE" },
+        { 0x216, "ARITHMETIC_OVERFLOW" },
         { 0x253, "BAD_PIPE" },
         { 0x254, "PIPE_BUSY" },
         { 0x255, "NO_DATA" },
@@ -551,6 +563,7 @@ static const value_string system_error_code_vals[] = {
         { 0x257, "MORE_DATA" },
         { 0x260, "VC_DISCONNECTED" },
         { 0x2EE, "INVALID_EA_HANDLE" },
+        { 0x2F0, "ERROR_CACHE_PAGE_LOCKED" },
         { 0x3F0, "EA_FILE_CORRUPT" },
         { 0x3F1, "EA_TABLE_FULL" },
         { 0x3F2, "INVALID_EA_HANDLE" },
@@ -841,6 +854,25 @@ static const value_string system_error_code_vals[] = {
         // Add more common status codes as needed
         { 0, NULL }
 };
+
+    static const char *
+    procmon_decode_event_result(uint32_t event_class, uint32_t result)
+    {
+      const char *result_str;
+
+      /* File-system/registry/network/profiling events are typically NT kernel paths. */
+      if (event_class == PROCMON_EVENT_CLASS_TYPE_FILE_SYSTEM ||
+        event_class == PROCMON_EVENT_CLASS_TYPE_REGISTRY ||
+        event_class == PROCMON_EVENT_CLASS_TYPE_NETWORK ||
+        event_class == PROCMON_EVENT_CLASS_TYPE_PROFILING)
+      {
+        result_str = try_val_to_str(result, ntstatus_context_result_vals);
+        if (result_str != NULL)
+          return result_str;
+      }
+
+      return try_val_to_str(result, system_error_code_vals);
+    }
 
 
 static bool dissect_procmon_process_event(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, uint32_t operation, tvbuff_t* extra_details_tvb _U_)
@@ -3107,7 +3139,7 @@ dissect_procmon_event(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void 
     proto_item *ti, *ti_event, *ti_operation;
     proto_tree *procmon_tree, *header_tree, *stack_trace_tree;
     int         offset = 0;
-    uint32_t event_class, operation;
+    uint32_t event_class, operation, event_result;
     uint32_t details_size, extra_details_offset;
     nstime_t timestamp;
     uint16_t extra_details_size = 0;
@@ -3227,7 +3259,12 @@ dissect_procmon_event(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void 
     filetime_to_nstime(&timestamp, tvb_get_letoh64(tvb, offset));
     proto_tree_add_time(header_tree, hf_procmon_timestamp, tvb, offset, 8, &timestamp);
     offset += 8;
-    proto_tree_add_item(header_tree, hf_procmon_event_result, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+    proto_item *ti_result = proto_tree_add_item_ret_uint(header_tree, hf_procmon_event_result, tvb, offset, 4, ENC_LITTLE_ENDIAN, &event_result);
+    const char *event_result_str = procmon_decode_event_result(event_class, event_result);
+    if (event_result_str != NULL)
+      proto_item_set_text(ti_result, "Event Result: %s (0x%08x)", event_result_str, event_result);
+    else
+      proto_item_set_text(ti_result, "Event Result: Unknown (0x%08x)", event_result);
     offset += 4;
     proto_tree_add_item(header_tree, hf_procmon_stack_trace_depth, tvb, offset, 2, ENC_LITTLE_ENDIAN);
     offset += 2;
@@ -3425,7 +3462,7 @@ event_register_procmon(void)
         },
         { &hf_procmon_event_result,
           { "Event Result", "procmon.event_result",
-            FT_UINT32, BASE_DEC_HEX, VALS(system_error_code_vals), 0, NULL, HFILL }
+            FT_UINT32, BASE_HEX, VALS(system_error_code_vals), 0, NULL, HFILL }
         },
         { &hf_procmon_stack_trace_depth,
           { "Stack Trace Depth", "procmon.stack_trace_depth",
