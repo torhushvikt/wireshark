@@ -166,6 +166,34 @@ static int hf_procmon_filesystem_create_file_sid_authority;
 static int hf_procmon_filesystem_create_file_sid_value;
 static int hf_procmon_filesystem_create_file_open_result;
 static int hf_procmon_filesystem_readwrite_file_io_flags;
+static int hf_procmon_filesystem_readwrite_file_io_flags_non_cached;
+static int hf_procmon_filesystem_readwrite_file_io_flags_paging_io;
+static int hf_procmon_filesystem_readwrite_file_io_flags_synchronous;
+static int hf_procmon_filesystem_readwrite_file_io_flags_no_intermediate_buffering;
+static int hf_procmon_filesystem_readwrite_file_io_flags_buffered;
+static int hf_procmon_filesystem_readwrite_file_io_flags_synchronous_api;
+static int hf_procmon_filesystem_readwrite_file_io_flags_synchronous_paging_io;
+static int hf_procmon_filesystem_readwrite_file_io_flags_create_operation;
+static int hf_procmon_filesystem_readwrite_file_io_flags_read_operation;
+static int hf_procmon_filesystem_readwrite_file_io_flags_write_operation;
+static int hf_procmon_filesystem_readwrite_file_io_flags_delete_operation;
+static int hf_procmon_filesystem_readwrite_file_io_flags_rename_operation;
+static int hf_procmon_filesystem_readwrite_file_io_flags_delete_on_close;
+static int hf_procmon_filesystem_readwrite_file_io_flags_quota_exceeded;
+static int hf_procmon_filesystem_readwrite_file_io_flags_backup_intent;
+static int hf_procmon_filesystem_readwrite_file_io_flags_recovery;
+static int hf_procmon_filesystem_readwrite_file_io_flags_kernel_handle;
+static int hf_procmon_filesystem_readwrite_file_io_flags_remove_on_close;
+static int hf_procmon_filesystem_readwrite_file_io_flags_opened_for_synchronous_io;
+static int hf_procmon_filesystem_readwrite_file_io_flags_sequential_scan;
+static int hf_procmon_filesystem_readwrite_file_io_flags_random_access;
+static int hf_procmon_filesystem_readwrite_file_io_flags_complete_if_oplocked;
+static int hf_procmon_filesystem_readwrite_file_io_flags_write_through;
+static int hf_procmon_filesystem_readwrite_file_io_flags_priority_hint;
+static int hf_procmon_filesystem_readwrite_file_io_flags_attribute_cache;
+static int hf_procmon_filesystem_readwrite_file_io_flags_handle_no_sync;
+static int hf_procmon_filesystem_readwrite_file_io_flags_no_dir_notify;
+static int hf_procmon_filesystem_readwrite_file_io_flags_full_ea_information;
 static int hf_procmon_filesystem_readwrite_file_priority;
 static int hf_procmon_filesystem_readwrite_file_length;
 static int hf_procmon_filesystem_readwrite_file_offset;
@@ -234,6 +262,7 @@ static int ett_procmon_filesystem_path;
 static int ett_procmon_filesystem_create_file_impersonating;
 static int ett_procmon_filesystem_directory;
 static int ett_procmon_filesystem_information;
+static int ett_procmon_filesystem_readwrite_file_io_flags;
 static int ett_procmon_profiling_event;
 static int ett_procmon_network_event;
 static int ett_procmon_network_flags;
@@ -276,30 +305,6 @@ static int dissect_procmon_detail_string(tvbuff_t* tvb, proto_tree* tree, int of
         proto_tree_add_item(tree, hf_detail_string, tvb, offset, path_size, is_ascii ? ENC_ASCII : ENC_UTF_16|ENC_LITTLE_ENDIAN);
         return offset + path_size;
 }
-
-static void dissect_procmon_io_mask(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, int offset, int hf_io_mask, int length, const value_string* vs_io_values)
-{
-    int i = 0;
-    bool first = true;
-    proto_item* ti;
-    uint32_t io_mask;
-
-    ti = proto_tree_add_bitmask_with_flags(tree, tvb, offset, hf_io_mask, ett_procmon_network_flags, vs_io_values, ENC_LITTLE_ENDIAN);
-
-    while (vs_io_values[i].strptr) {
-        if ((vs_io_values[i].value & io_mask) == vs_io_values[i].value)
-        {
-            if (first)
-                first = false;
-            else
-                proto_item_append_text(ti, ", ");
-            proto_item_append_text(ti, "%s", vs_io_values[i].strptr);
-        }
-
-        i++;
-    }
-}
-
 
 static void dissect_procmon_access_mask(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, int offset, int hf_access_mask, int length, uint32_t* mapping, const value_string* vs_mask_values)
 {
@@ -2383,39 +2388,37 @@ static bool dissect_procmon_filesystem_event(tvbuff_t* tvb, packet_info* pinfo, 
         {0x2000000, "Maximum Allowed"},
         { 0, NULL }
     };
-    static const value_string file_system_io_flags_vals[] = {
-        // Basic I/O flags
-        {0x1, "Non-cached"},
-        {0x2, "Paging I/O"},
-        {0x4, "Synchronous"},
-        {0x8, "No Intermediate Buffering"},
-        {0x10, "Buffered"},
-        {0x20, "Synchronous API"},
-        {0x40, "Synchronous Paging I/O"},
-        // Extended I/O flags
-        {0x80, "Create Operation"},
-        {0x100, "Read Operation"},
-        {0x200, "Write Operation"},
-        {0x400, "Delete Operation"},
-        {0x800, "Rename Operation"},
-        {0x1000, "Delete on Close"},
-        {0x2000, "Quota Exceeded"},
-        {0x4000, "Opened for Backup Intent"},
-        {0x8000, "Opened for Recovery"},
-        {0x10000, "Kernel Handle"},
-        {0x20000, "Remove on Close"},
-        {0x40000, "Opened for Synchronous I/O"},
-        {0x80000, "Sequential Scan"},
-        {0x100000, "Random Access"},
-        {0x200000, "Complete If Oplocked"},
-        {0x400000, "Write Through"},
-        {0x800000, "Priority Hint"},
-        {0x1000000, "Attribute Cache"},
-        {0x2000000, "Handle No Sync"},
-        {0x4000000, "No Dir Notify"},
-        {0x8000000, "Full EA Information"},
-        { 0, NULL }
-    };
+      static int* const file_system_io_flags_fields[] = {
+        &hf_procmon_filesystem_readwrite_file_io_flags_non_cached,
+        &hf_procmon_filesystem_readwrite_file_io_flags_paging_io,
+        &hf_procmon_filesystem_readwrite_file_io_flags_synchronous,
+        &hf_procmon_filesystem_readwrite_file_io_flags_no_intermediate_buffering,
+        &hf_procmon_filesystem_readwrite_file_io_flags_buffered,
+        &hf_procmon_filesystem_readwrite_file_io_flags_synchronous_api,
+        &hf_procmon_filesystem_readwrite_file_io_flags_synchronous_paging_io,
+        &hf_procmon_filesystem_readwrite_file_io_flags_create_operation,
+        &hf_procmon_filesystem_readwrite_file_io_flags_read_operation,
+        &hf_procmon_filesystem_readwrite_file_io_flags_write_operation,
+        &hf_procmon_filesystem_readwrite_file_io_flags_delete_operation,
+        &hf_procmon_filesystem_readwrite_file_io_flags_rename_operation,
+        &hf_procmon_filesystem_readwrite_file_io_flags_delete_on_close,
+        &hf_procmon_filesystem_readwrite_file_io_flags_quota_exceeded,
+        &hf_procmon_filesystem_readwrite_file_io_flags_backup_intent,
+        &hf_procmon_filesystem_readwrite_file_io_flags_recovery,
+        &hf_procmon_filesystem_readwrite_file_io_flags_kernel_handle,
+        &hf_procmon_filesystem_readwrite_file_io_flags_remove_on_close,
+        &hf_procmon_filesystem_readwrite_file_io_flags_opened_for_synchronous_io,
+        &hf_procmon_filesystem_readwrite_file_io_flags_sequential_scan,
+        &hf_procmon_filesystem_readwrite_file_io_flags_random_access,
+        &hf_procmon_filesystem_readwrite_file_io_flags_complete_if_oplocked,
+        &hf_procmon_filesystem_readwrite_file_io_flags_write_through,
+        &hf_procmon_filesystem_readwrite_file_io_flags_priority_hint,
+        &hf_procmon_filesystem_readwrite_file_io_flags_attribute_cache,
+        &hf_procmon_filesystem_readwrite_file_io_flags_handle_no_sync,
+        &hf_procmon_filesystem_readwrite_file_io_flags_no_dir_notify,
+        &hf_procmon_filesystem_readwrite_file_io_flags_full_ea_information,
+        NULL
+      };
 
     if (pinfo->pseudo_header->procmon.system_bitness)
     {
@@ -2575,7 +2578,12 @@ static bool dissect_procmon_filesystem_event(tvbuff_t* tvb, packet_info* pinfo, 
             //Unknown fields
             file_offset += 4;
 
-            dissect_procmon_access_mask(tvb, pinfo, filesystem_tree, file_offset, hf_procmon_filesystem_readwrite_file_io_flags, 4, NULL, file_system_io_flags_vals);
+          proto_tree_add_bitmask_with_flags(filesystem_tree, tvb, file_offset,
+            hf_procmon_filesystem_readwrite_file_io_flags,
+            ett_procmon_filesystem_readwrite_file_io_flags,
+            file_system_io_flags_fields,
+            ENC_LITTLE_ENDIAN,
+            BMT_NO_APPEND);
             proto_tree_add_item(filesystem_tree, hf_procmon_filesystem_readwrite_file_priority, tvb, file_offset, 4, ENC_LITTLE_ENDIAN);
             file_offset += 4;
 
@@ -3797,7 +3805,7 @@ event_register_procmon(void)
         },
         { &hf_procmon_filesystem_create_file_disposition,
           { "Disposition", "procmon.filesystem.create_file.disposition",
-            FT_UINT8, BASE_DEC, VALS(filesystem_disposition_vals), 0, NULL, HFILL}
+            FT_UINT8, BASE_DEC_HEX, VALS(filesystem_disposition_vals), 0, NULL, HFILL}
         },
         { &hf_procmon_filesystem_create_file_options,
           { "Options", "procmon.filesystem.create_file.options",
@@ -3837,7 +3845,119 @@ event_register_procmon(void)
         },
         { &hf_procmon_filesystem_readwrite_file_io_flags,
           { "IO Flags", "procmon.filesystem.readwrite_file.io_flags",
-            FT_UINT32, BASE_HEX, NULL, 0x00EFFFFF, NULL, HFILL }
+            FT_UINT32, BASE_HEX, NULL, 0, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_non_cached,
+          { "Non-cached", "procmon.filesystem.readwrite_file.io_flags.non_cached",
+            FT_BOOLEAN, 32, NULL, 0x00000001, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_paging_io,
+          { "Paging I/O", "procmon.filesystem.readwrite_file.io_flags.paging_io",
+            FT_BOOLEAN, 32, NULL, 0x00000002, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_synchronous,
+          { "Synchronous", "procmon.filesystem.readwrite_file.io_flags.synchronous",
+            FT_BOOLEAN, 32, NULL, 0x00000004, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_no_intermediate_buffering,
+          { "No Intermediate Buffering", "procmon.filesystem.readwrite_file.io_flags.no_intermediate_buffering",
+            FT_BOOLEAN, 32, NULL, 0x00000008, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_buffered,
+          { "Buffered", "procmon.filesystem.readwrite_file.io_flags.buffered",
+            FT_BOOLEAN, 32, NULL, 0x00000010, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_synchronous_api,
+          { "Synchronous API", "procmon.filesystem.readwrite_file.io_flags.synchronous_api",
+            FT_BOOLEAN, 32, NULL, 0x00000020, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_synchronous_paging_io,
+          { "Synchronous Paging I/O", "procmon.filesystem.readwrite_file.io_flags.synchronous_paging_io",
+            FT_BOOLEAN, 32, NULL, 0x00000040, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_create_operation,
+          { "Create Operation", "procmon.filesystem.readwrite_file.io_flags.create_operation",
+            FT_BOOLEAN, 32, NULL, 0x00000080, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_read_operation,
+          { "Read Operation", "procmon.filesystem.readwrite_file.io_flags.read_operation",
+            FT_BOOLEAN, 32, NULL, 0x00000100, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_write_operation,
+          { "Write Operation", "procmon.filesystem.readwrite_file.io_flags.write_operation",
+            FT_BOOLEAN, 32, NULL, 0x00000200, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_delete_operation,
+          { "Delete Operation", "procmon.filesystem.readwrite_file.io_flags.delete_operation",
+            FT_BOOLEAN, 32, NULL, 0x00000400, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_rename_operation,
+          { "Rename Operation", "procmon.filesystem.readwrite_file.io_flags.rename_operation",
+            FT_BOOLEAN, 32, NULL, 0x00000800, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_delete_on_close,
+          { "Delete on Close", "procmon.filesystem.readwrite_file.io_flags.delete_on_close",
+            FT_BOOLEAN, 32, NULL, 0x00001000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_quota_exceeded,
+          { "Quota Exceeded", "procmon.filesystem.readwrite_file.io_flags.quota_exceeded",
+            FT_BOOLEAN, 32, NULL, 0x00002000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_backup_intent,
+          { "Opened for Backup Intent", "procmon.filesystem.readwrite_file.io_flags.backup_intent",
+            FT_BOOLEAN, 32, NULL, 0x00004000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_recovery,
+          { "Opened for Recovery", "procmon.filesystem.readwrite_file.io_flags.recovery",
+            FT_BOOLEAN, 32, NULL, 0x00008000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_kernel_handle,
+          { "Kernel Handle", "procmon.filesystem.readwrite_file.io_flags.kernel_handle",
+            FT_BOOLEAN, 32, NULL, 0x00010000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_remove_on_close,
+          { "Remove on Close", "procmon.filesystem.readwrite_file.io_flags.remove_on_close",
+            FT_BOOLEAN, 32, NULL, 0x00020000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_opened_for_synchronous_io,
+          { "Opened for Synchronous I/O", "procmon.filesystem.readwrite_file.io_flags.opened_for_synchronous_io",
+            FT_BOOLEAN, 32, NULL, 0x00040000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_sequential_scan,
+          { "Sequential Scan", "procmon.filesystem.readwrite_file.io_flags.sequential_scan",
+            FT_BOOLEAN, 32, NULL, 0x00080000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_random_access,
+          { "Random Access", "procmon.filesystem.readwrite_file.io_flags.random_access",
+            FT_BOOLEAN, 32, NULL, 0x00100000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_complete_if_oplocked,
+          { "Complete If Oplocked", "procmon.filesystem.readwrite_file.io_flags.complete_if_oplocked",
+            FT_BOOLEAN, 32, NULL, 0x00200000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_write_through,
+          { "Write Through", "procmon.filesystem.readwrite_file.io_flags.write_through",
+            FT_BOOLEAN, 32, NULL, 0x00400000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_priority_hint,
+          { "Priority Hint", "procmon.filesystem.readwrite_file.io_flags.priority_hint",
+            FT_BOOLEAN, 32, NULL, 0x00800000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_attribute_cache,
+          { "Attribute Cache", "procmon.filesystem.readwrite_file.io_flags.attribute_cache",
+            FT_BOOLEAN, 32, NULL, 0x01000000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_handle_no_sync,
+          { "Handle No Sync", "procmon.filesystem.readwrite_file.io_flags.handle_no_sync",
+            FT_BOOLEAN, 32, NULL, 0x02000000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_no_dir_notify,
+          { "No Dir Notify", "procmon.filesystem.readwrite_file.io_flags.no_dir_notify",
+            FT_BOOLEAN, 32, NULL, 0x04000000, NULL, HFILL }
+        },
+        { &hf_procmon_filesystem_readwrite_file_io_flags_full_ea_information,
+          { "Full EA Information", "procmon.filesystem.readwrite_file.io_flags.full_ea_information",
+            FT_BOOLEAN, 32, NULL, 0x08000000, NULL, HFILL }
         },
         { &hf_procmon_filesystem_readwrite_file_priority,
           { "Priority", "procmon.filesystem.readwrite_file.priority",
@@ -4053,6 +4173,7 @@ event_register_procmon(void)
         &ett_procmon_filesystem_create_file_impersonating,
         &ett_procmon_filesystem_directory,
         &ett_procmon_filesystem_information,
+        &ett_procmon_filesystem_readwrite_file_io_flags,
         &ett_procmon_profiling_event,
         &ett_procmon_network_event,
         &ett_procmon_network_flags,
