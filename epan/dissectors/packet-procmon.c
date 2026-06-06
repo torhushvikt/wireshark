@@ -851,6 +851,7 @@ static const value_string system_error_code_vals[] = {
         { 0xC0000158, "STATUS_OBJECT_PATH_COMPONENT_NOT_FOUND" },
         { 0xC0000159, "STATUS_UNHANDLED_EXCEPTION" },
         { 0xC000015A, "STATUS_DEVICE_ENUMERATION_ERROR" },
+        { 0xC00002F0, "STATUS_OBJECTID_NOT_FOUND" },
         // Add more common status codes as needed
         { 0, NULL }
 };
